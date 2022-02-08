@@ -1,7 +1,3 @@
-import {
-    max_video_config,
-} from './resolution.js';
-
 import { WebMWriter } from './webm-writer.js';
 
 function onerror(e) {
@@ -13,7 +9,7 @@ const stop_el = document.getElementById('stop');
 const record_el = document.getElementById('record');
 const pcm_el = document.getElementById('pcm');
 const inmem_el = document.getElementById('in-memory');
-let video_track, audio_track;
+let audio_track;
 
 const video = document.getElementById('video');
 video.onerror = () => onerror(video.error);
@@ -39,28 +35,19 @@ inmem_el.disabled = true;
 
 // See https://www.webmproject.org/vp9/mp4/
 // and also https://googlechrome.github.io/samples/media/vp9-codec-string.html
-const vp9_params = {
-    profile: 0,
-    level: 10,
-    bit_depth: 8,
-    chroma_subsampling: 1
-};
-const vp9c = Object.fromEntries(Object.entries(vp9_params).map(
-    ([k, v]) => [k, v.toString().padStart(2, '0')]));
-const vp9_codec = `vp09.${vp9c.profile}.${vp9c.level}.${vp9c.bit_depth}.${vp9c.chroma_subsampling}`;
 
+let writer;
 start_el.addEventListener('click', async function () {
     this.disabled = true;
     record_el.disabled = true;
     pcm_el.disabled = true;
     inmem_el.disabled = true;
 
-    let writer;
     const rec_info = document.getElementById('rec_info');
     if (record_el.checked) {
         writer = new WebMWriter();
         try {
-            await writer.start(inmem_el.checked ? null : 'camera.webm');
+            await writer.start('camera.webm');
         } catch (ex) {
             this.disabled = false;
             record_el.disabled = false;
@@ -77,48 +64,21 @@ start_el.addEventListener('click', async function () {
     if (!pcm_el.checked) {
         buf_info.innerText = 'Buffering';
     }
-
+    const ac = new AudioContext();
+    const msd = new MediaStreamAudioDestinationNode(ac);
+    const { stream } = msd;
+    const osc = new OscillatorNode(ac, {frequency: 200});
+    osc.connect(msd);
+    osc.start();
+/*
     const stream = await navigator.mediaDevices.getUserMedia({
-        audio: true,
-        video: {
-            width: 4096,
-            height: 2160,
-            frameRate: {
-                ideal: 30,
-                max: 30
-            }
-        }
+        audio: true
     });
-
-    video_track = stream.getVideoTracks()[0];
-    const video_readable = (new MediaStreamTrackProcessor(video_track)).readable;
-    const video_settings = video_track.getSettings();
-
-    const encoder_constraints = {
-        //codec: 'avc1.42E01E',
-        codec: vp9_codec,
-        width: video_settings.width,
-        height: video_settings.height,
-        bitrate: 2500 * 1000,
-        framerate: video_settings.frameRate,
-        latencyMode: 'realtime',
-        /*avc: {
-            format: 'annexb'
-        }*/
-    };
-
-    const video_encoder_config = await max_video_config({
-        ...encoder_constraints,
-        ratio: video_settings.width / video_settings.height
-    }) || await max_video_config(encoder_constraints);
-
-    console.log(`video resolution: ${video_settings.width}x${video_settings.height}`);
-    console.log(`encoder resolution: ${video_encoder_config.width}x${video_encoder_config.height}`);
-
+*/
     audio_track = stream.getAudioTracks()[0];
     const audio_readable = (new MediaStreamTrackProcessor(audio_track)).readable;
     const audio_settings = audio_track.getSettings();
-
+    console.log(audio_settings);
     let num_exits = 0;
 
     function relay_data(ev) {
@@ -140,10 +100,6 @@ start_el.addEventListener('click', async function () {
         }
     }
 
-    const video_worker = new Worker('./encoder-worker.js');
-    video_worker.onerror = onerror;
-    video_worker.onmessage = relay_data;
-
     const audio_worker = new Worker('./encoder-worker.js');
     audio_worker.onerror = onerror;
     audio_worker.onmessage = relay_data;
@@ -164,7 +120,6 @@ start_el.addEventListener('click', async function () {
                     onerror(`muxer exited with status ${msg.code}`);
                 }
                 webm_worker.terminate();
-                video_worker.terminate();
                 audio_worker.terminate();
                 exited = true;
 
@@ -194,12 +149,6 @@ start_el.addEventListener('click', async function () {
                 break;
 
             case 'start-stream':
-                video_worker.postMessage({
-                    type: 'start',
-                    readable: video_readable,
-                    key_frame_interval,
-                    config: video_encoder_config
-                }, [video_readable]);
 
                 audio_worker.postMessage({
                     type: 'start',
@@ -275,14 +224,6 @@ start_el.addEventListener('click', async function () {
             //webm_receiver: './test-receiver.js',
             webm_metadata: {
                 max_segment_duration: BigInt(1000000000),
-                video: {
-                    width: video_encoder_config.width,
-                    height: video_encoder_config.height,
-                    frame_rate: video_settings.frameRate,
-                    //codec_id: 'V_MPEG4/ISO/AVC'
-                    codec_id: 'V_VP9',
-                    ...vp9_params
-                },
                 audio: {
                     bit_depth: pcm_el.checked ? 32 : 0,
                     sample_rate: audio_settings.sampleRate,
@@ -301,7 +242,7 @@ start_el.addEventListener('click', async function () {
     video.src = URL.createObjectURL(source);
 
     source.addEventListener('sourceopen', function () {
-        buffer = this.addSourceBuffer('video/webm; codecs=vp9,opus');
+        buffer = this.addSourceBuffer('video/webm; codecs=opus');
         buffer.addEventListener('updateend', remove_append);
         start();
     });
@@ -309,6 +250,6 @@ start_el.addEventListener('click', async function () {
 
 stop_el.addEventListener('click', async function () {
     this.disabled = true;
-    video_track.stop();
     audio_track.stop();
+    await writer.finish();
 });
