@@ -1,9 +1,7 @@
 // metadata flags
-const video_flag = 0b01;
 const audio_flag = 0b10;
 
 // header flags
-const video_type_flag  = 0b001;
 const key_flag         = 0b010;
 const new_cluster_flag = 0b100;
 
@@ -20,16 +18,12 @@ function onerror(e) {
 let metadata;
 let options;
 let webm_muxer;
-let first_video_timestamp = null;
 let first_audio_timestamp = null; // using timestamps on encoded chunks
 let next_audio_timestamp = 0; // using durations on encoded chunks
 let last_timestamp = -1;
-let last_video_in_timestamp = 0;
-let last_video_out_timestamp = 0;
 let last_audio_in_timestamp = 0;
 let last_audio_out_timestamp = 0;
 let audio_msgs_since_last_cluster = 0;
-let queued_video = [];
 let queued_audio = [];
 let num_timestamp_mismatch_warnings = 0;
 
@@ -51,7 +45,6 @@ function send_msg(msg) {
 
     const header = new ArrayBuffer(1);
     new DataView(header).setUint8(0,
-        (msg.type == 'video-data' ? video_type_flag : 0) |
         (msg.is_key ? key_flag : 0) |
         (msg.new_cluster ? new_cluster_flag : 0),
         true);
@@ -66,24 +59,6 @@ function send_msg(msg) {
     send_data(timestamp);
     send_data(duration);
     send_data(msg.data);
-}
-
-function get_video_ts(vmsg) {
-    const vtimestamp = last_video_out_timestamp + (vmsg.timestamp - last_video_in_timestamp);
-    if (vtimestamp <= last_timestamp) {
-        if (vtimestamp < last_timestamp) {
-            console.warn(`video timestamp ${vtimestamp} is older than last timestamp ${last_timestamp}`);
-        }
-        return last_timestamp + 1;
-    }
-    return vtimestamp;
-}
-
-function set_video_ts(vmsg, vtimestamp) {
-    last_video_in_timestamp = vmsg.timestamp;
-    vmsg.timestamp = vtimestamp;
-    last_video_out_timestamp = vtimestamp;
-    return vmsg;
 }
 
 function get_audio_ts(amsg) {
@@ -112,28 +87,9 @@ function send_msgs(opts) {
         return;
     }
 
-    if (!metadata.audio) {
-        while (queued_video.length > 0) {
-            send_msg(queued_video.shift());
-        }
-        return;
-    }
-
-    while ((queued_video.length > 0) && (queued_audio.length > 0)) {
-        const vtimestamp = get_video_ts(queued_video[0]);
+    while (queued_audio.length > 0) {
         const atimestamp = get_audio_ts(queued_audio[0]);
-
-        if (vtimestamp < atimestamp) {
-            send_msg(set_video_ts(queued_video.shift(), vtimestamp));
-        } else {
-            send_msg(set_audio_ts(queued_audio.shift(), atimestamp));
-        }
-    }
-
-    while (queued_video.length > opts.video_queue_limit) {
-        const msg = queued_video.shift();
-        const vtimestamp = get_video_ts(msg);
-        send_msg(set_video_ts(msg, vtimestamp));
+        send_msg(set_audio_ts(queued_audio.shift(), atimestamp));
     }
 
     while (queued_audio.length > opts.audio_queue_limit) {
@@ -155,51 +111,9 @@ function send_metadata(metadata) {
 
     const flags = new ArrayBuffer(1);
     new DataView(flags).setUint8(0,
-        (metadata.video ? video_flag : 0) |
         (metadata.audio ? audio_flag : 0),
         true);
     send_data(flags);
-
-    if (metadata.video) {
-        const width = new ArrayBuffer(4);
-        new DataView(width).setInt32(0, metadata.video.width, true);
-        send_data(width);
-
-        const height = new ArrayBuffer(4);
-        new DataView(height).setInt32(0, metadata.video.height, true);
-        send_data(height);
-
-        const frame_rate = new ArrayBuffer(4);
-        new DataView(frame_rate).setFloat32(0, metadata.video.frame_rate || 0, true);
-        send_data(frame_rate);
-
-        send_data(new TextEncoder().encode(metadata.video.codec_id).buffer);
-
-        if (metadata.video.codec_id === 'V_VP9') {
-            // See https://www.webmproject.org/docs/container/#vp9-codec-feature-metadata-codecprivate
-            const codec_private = new ArrayBuffer(12);
-            const view = new DataView(codec_private);
-            view.setUint8(0, 1); // profile
-            view.setUint8(1, 1); // length
-            view.setUint8(2, metadata.video.profile || 0);
-            view.setUint8(3, 2); // level
-            view.setUint8(4, 1); // length
-            view.setUint8(5, metadata.video.level || 10);
-            view.setUint8(6, 3); // bit depth
-            view.setUint8(7, 1); // length
-            view.setUint8(8, metadata.video.bit_depth || 8);
-            view.setUint8(9, 4); // chroma subsampling
-            view.setUint8(10, 1); // length
-            view.setUint8(11, metadata.video.chrome_subsampling || 1);
-            send_data(codec_private);
-        } else {
-            send_data(new ArrayBuffer(0));
-        }
-
-        const seek_pre_roll = new ArrayBuffer(8);
-        new DataView(seek_pre_roll).setBigUint64(0, metadata.video.seek_pre_roll || BigInt(0), true);
-        send_data(seek_pre_roll);
-    }
 
     if (metadata.audio) {
         const sample_rate = new ArrayBuffer(4);
@@ -249,17 +163,6 @@ function send_metadata(metadata) {
 onmessage = function (e) {
     const msg = e.data;
     switch (msg.type) {
-        case 'video-data':
-            if (metadata.video) {
-                if (first_video_timestamp === null) {
-                    first_video_timestamp = msg.timestamp;
-                }
-                msg.timestamp -= first_video_timestamp;
-                queued_video.push(msg);
-                send_msgs(options);
-            }
-            break;
-
         case 'audio-data':
             if (metadata.audio) {
                 if (first_audio_timestamp === null) {
@@ -291,7 +194,6 @@ onmessage = function (e) {
         case 'start': {
             metadata = msg.webm_metadata;
             options = {
-                video_queue_limit: Infinity,
                 audio_queue_limit: Infinity,
                 use_audio_timestamps: false,
                 ...msg.webm_options
@@ -340,7 +242,7 @@ onmessage = function (e) {
                 if (queued_audio.length > 0) {
                     queued_audio[0].new_cluster = true;
                 }
-                send_msgs({ video_queue_limit: 0, audio_queue_limit: 0 });
+                send_msgs({ audio_queue_limit: 0 });
                 webm_muxer.postMessage(msg);
             }
             break;
