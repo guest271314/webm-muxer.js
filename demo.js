@@ -47,7 +47,7 @@ start_el.addEventListener('click', async function () {
     if (record_el.checked) {
         writer = new WebMWriter();
         try {
-            await writer.start('camera.webm');
+            await writer.start('audio.webm');
         } catch (ex) {
             this.disabled = false;
             record_el.disabled = false;
